@@ -43,6 +43,7 @@ AI_TELEGRAM_USER_ID=""
 AI_REPO="unsloth/gemma-4-26B-A4B-it-GGUF"
 AI_MODEL_NAME="gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"
 AI_MODEL="local"
+AI_WEB_PORT="8766"
 AI_SERVER_ARGS="--auto"
 AI_START_TIMEOUT="180"
 
@@ -186,9 +187,19 @@ cmd_go() {
     fi
   fi
 
+  # The engine's own web UI is the app. When it was not built, the chat page
+  # takes its place, so there is always something to open.
+  if [ ! -f "$AI_BUILD_DIR/bin/ui/index.html" ] && ! is_running web; then
+    cmd_web >/dev/null 2>&1 || true
+  fi
+
   echo
-  say "chat:      http://127.0.0.1:$AI_PORT/            (from the phone browser)"
-  say "           http://$(ip_addr):$AI_PORT/            (from another device on the wifi)"
+    say "chat:      http://127.0.0.1:$AI_PORT/            (the app, in the phone browser)"
+    say "           http://$(ip_addr):$AI_PORT/            (from another device on the wifi)"
+  else
+    say "chat:      http://127.0.0.1:$AI_WEB_PORT/         (the chat page)"
+    say "           http://$(ip_addr):$AI_WEB_PORT/         (from another device on the wifi)"
+  fi
   say "api:       http://127.0.0.1:$AI_PORT/v1"
   say "model:     $(basename "$AI_MODEL_FILE")"
   say "logs:      ai logs server | ai logs bot | ai logs model"
@@ -197,6 +208,7 @@ cmd_go() {
 
 cmd_stop() {
   stop_service telegram-agent
+  stop_service web
   stop_service bmoe-server
   # Anything left over from an earlier run of the same binary.
   if pgrep -f "$AI_BMOE_SERVER" >/dev/null 2>&1; then
@@ -401,6 +413,24 @@ print()
 PY
 }
 
+cmd_web() {
+  ensure_dirs
+  local webdir="$AI_ROOT/projects/ai-control/web"
+  [ -f "$webdir/chat.html" ] || die "the chat page is missing: $webdir/chat.html"
+  if is_running web; then
+    ok "the chat page is already up (pid $(pid_of web))"
+  else
+    nohup python3 -m http.server "$AI_WEB_PORT" --bind 0.0.0.0 --directory "$webdir" \
+      >>"$AI_LOG_DIR/web.log" 2>&1 &
+    echo $! > "$(pidfile web)"
+    disown 2>/dev/null || true
+    sleep 1
+    if is_running web; then ok "chat page up on port $AI_WEB_PORT (pid $(pid_of web))"; else bad "the chat page did not start - see $AI_LOG_DIR/web.log"; return 1; fi
+  fi
+  say "open it at: http://127.0.0.1:$AI_WEB_PORT/  (phone browser)"
+  say "            http://$(ip_addr):$AI_WEB_PORT/  (another device on the wifi)"
+}
+
 cmd_help() {
   cat <<EOF
 ai - run the local AI stack on this phone
@@ -445,6 +475,7 @@ case "${1:-help}" in
   status|st)     shift; cmd_status "$@" ;;
   logs|log)      shift; cmd_logs "$@" ;;
   ask|chat)      shift; cmd_ask "$@" ;;
+  web)           shift; cmd_web "$@" ;;
   build)         shift; cmd_build "$@" ;;
   resume)        shift; cmd_resume "$@" ;;
   model)         shift; cmd_model "$@" ;;
