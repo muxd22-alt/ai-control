@@ -276,7 +276,7 @@ cmd_build() {
 # never "start over".
 cmd_resume() {
   ensure_dirs
-  local part="$AI_MODEL_FILE.part"  if [ ! -f "$AI_MODEL_FILE" ]; then
+  if [ ! -f "$AI_MODEL_FILE" ]; then
     if [ -f "$AI_MODEL_FILE.part" ]; then
       info "model is half-downloaded ($(human_size "$(stat -c%s "$AI_MODEL_FILE.part")")) - resuming"
     else
