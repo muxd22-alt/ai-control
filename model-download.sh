@@ -23,6 +23,16 @@ TARGET="$AI_MODEL_FILE"
 PART="$TARGET.part"
 URL="https://huggingface.co/$AI_REPO/resolve/main/$AI_MODEL_NAME"
 
+# One downloader at a time: two curls writing the same .part file would
+# corrupt it.
+exec 9>"$AI_ROOT/run/model-download.lock" 2>/dev/null || true
+if command -v flock >/dev/null 2>&1; then
+  if ! flock -n 9; then
+    echo "another download is already running - nothing to do"
+    exit 0
+  fi
+fi
+
 log() { echo "[$(date -u +%FT%TZ)] $*" | tee -a "$LOG"; }
 
 remote_size() {
