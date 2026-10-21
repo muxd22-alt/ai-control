@@ -7,6 +7,8 @@ ai go       start the engine (and the telegram bridge when it is configured)
 ai stop     stop everything ai started
 ai status   what is running right now
 ai logs     tail a log:  ai logs server | ai logs bot | ai logs model
+ai ask      ask the model, right here in the terminal
+ai web      serve the single-file chat page (the fallback app)
 ai build    build the engine natively on this phone
 ai model    download the model
 ai resume   finish whatever the phone lost (model, build) and start
@@ -38,6 +40,19 @@ projects and links `ai` into `~/bin/ai` (already on the Termux PATH).
     ├── bmoe-termux/    <- native Termux build of the engine
     └── telegram-agent/ <- telegram bridge
 ```
+
+## The apps that talk to the engine
+
+The engine speaks the OpenAI API on `http://127.0.0.1:8765/v1`, so anything
+that speaks OpenAI can use it:
+
+| app | how |
+|---|---|
+| the upstream web UI | built by `ai build`, opened at `http://127.0.0.1:8765/` |
+| the chat page | `ai web`, opened at `http://127.0.0.1:8766/` - one file, works on the phone and on the wifi |
+| the terminal | `ai ask "what is the capital of Peru"` |
+| opencode | add a provider with baseURL `http://<phone>:8765/v1` |
+| Chatbox, LobeChat, Enchanted, Jan, Open WebUI | point the base URL at `http://<phone>:8765/v1` |
 
 ## Configuration
 
