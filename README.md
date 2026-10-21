@@ -9,6 +9,7 @@ ai status   what is running right now
 ai logs     tail a log:  ai logs server | ai logs bot | ai logs model
 ai build    build the engine natively on this phone
 ai model    download the model
+ai resume   finish whatever the phone lost (model, build) and start
 ai update   git pull every project
 ai doctor   check the stack
 ```

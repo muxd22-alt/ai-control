@@ -7,6 +7,7 @@
 #   ai logs    tail a log (server | bot | model)
 #   ai build   native Termux build of the engine
 #   ai model   download / verify the model
+#   ai resume  finish whatever the phone lost (model, build) and start
 #   ai update  git pull every project, rebuild if the engine changed
 #   ai doctor  diagnose the stack
 #
@@ -129,7 +130,12 @@ wait_for_server() {
 cmd_go() {
   ensure_dirs
   [ -x "$AI_BMOE_SERVER" ] || die "engine not built: $AI_BMOE_SERVER  -> run: ai build"
-  [ -f "$AI_MODEL_FILE" ] || die "model missing: $AI_MODEL_FILE  -> run: ai model"
+  if [ ! -f "$AI_MODEL_FILE" ]; then
+    if [ -f "$AI_MODEL_FILE.part" ]; then
+      die "model is half-downloaded ($AI_MODEL_FILE.part)  -> run: ai resume"
+    fi
+    die "model missing: $AI_MODEL_FILE  -> run: ai model"
+  fi
 
   # Keep the phone awake and out of the battery saver while the engine runs.
   command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock >/dev/null 2>&1
@@ -249,8 +255,46 @@ cmd_build() {
   local dir="$AI_PROJECTS/bmoe-termux"
   [ -d "$dir" ] || die "project not found: $dir (clone muxd22-alt/bmoe-termux)"
   info "building the engine natively on this phone (this takes a while)"
-  bash "$dir/build.sh"
-  [ -x "$AI_BMOE_SERVER" ] && ok "engine built: $AI_BMOE_SERVER" || die "build failed - see $AI_LOG_DIR/build.log"
+  # The build runs detached and the log is followed here: a phone that is
+  # plugged in and pocketed still finishes the job when the terminal closes.
+  nohup bash "$dir/build.sh" >"$AI_LOG_DIR/build.log" 2>&1 &
+  local bp=$!
+  disown 2>/dev/null || true
+  info "build pid $bp, log: $AI_LOG_DIR/build.log"
+  local last=""
+  while kill -0 "$bp" 2>/dev/null; do
+    sleep 5
+    local now; now="$(tail -n 1 "$AI_LOG_DIR/build.log" 2>/dev/null)"
+    [ "$now" != "$last" ] && { printf '\r%s' "${now:0:100}"; last="$now"; }
+  done
+  echo
+  [ -x "$AI_BMOE_SERVER" ] && ok "engine built: $AI_BMOE_SERVER" || { bad "build failed"; tail -n 30 "$AI_LOG_DIR/build.log"; return 1; }
+}
+
+# Resume whatever the phone lost: a half-downloaded model, a half-finished
+# build. Android kills Termux when it wants the memory back, and the answer is
+# never "start over".
+cmd_resume() {
+  ensure_dirs
+  local part="$AI_MODEL_FILE.part"
+  if [ ! -f "$AI_MODEL_FILE" ]; then
+    if [ -f "$part" ]; then
+      info "model is half-downloaded ($(human_size "$(stat -c%s "$part")")) - resuming"
+    else
+      info "model missing - downloading"
+    fi
+    bash "$AI_ROOT/projects/ai-control/model-download.sh" || die "model download failed"
+    ok "model ready"
+  else
+    ok "model already complete"
+  fi
+  if [ ! -x "$AI_BMOE_SERVER" ]; then
+    info "engine missing - building"
+    cmd_build || die "build failed"
+  else
+    ok "engine binary present"
+  fi
+  cmd_go
 }
 
 cmd_model() {
@@ -309,6 +353,7 @@ ai - run the local AI stack on this phone
   ai logs     tail a log:  ai logs server | ai logs bot | ai logs model
   ai build    build the engine natively on this phone
   ai model    download the model (ai model download)
+  ai resume   finish whatever the phone lost (model, build) and start
   ai update   git pull every project
   ai doctor   check the stack
 EOF
@@ -341,6 +386,7 @@ case "${1:-help}" in
   status|st)     shift; cmd_status "$@" ;;
   logs|log)      shift; cmd_logs "$@" ;;
   build)         shift; cmd_build "$@" ;;
+  resume)        shift; cmd_resume "$@" ;;
   model)         shift; cmd_model "$@" ;;
   update|pull)   shift; cmd_update "$@" ;;
   doctor|check)  shift; cmd_doctor "$@" ;;
