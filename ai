@@ -42,6 +42,7 @@ AI_TELEGRAM_TOKEN=""
 AI_TELEGRAM_USER_ID=""
 AI_REPO="unsloth/gemma-4-26B-A4B-it-GGUF"
 AI_MODEL_NAME="gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"
+AI_MODEL="local"
 AI_SERVER_ARGS="--auto"
 AI_START_TIMEOUT="180"
 
@@ -355,6 +356,51 @@ cmd_doctor() {
   return $fail
 }
 
+cmd_ask() {
+  local prompt="$*"
+  [ -n "$prompt" ] || die "usage: ai ask \"your question\""
+  python3 - "$AI_PORT" "$AI_MODEL" "$AI_API_KEY" "$prompt" <<'PY' 2>/dev/null || bad "the engine did not answer"
+import json, sys, urllib.request
+
+port, model, key, prompt = sys.argv[1:5]
+body = json.dumps(
+    {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "stream": True,
+    }
+).encode()
+headers = {"Content-Type": "application/json"}
+if key:
+    headers["Authorization"] = "Bearer " + key
+req = urllib.request.Request(
+    f"http://127.0.0.1:{port}/v1/chat/completions", data=body, headers=headers, method="POST"
+)
+try:
+    with urllib.request.urlopen(req, timeout=1800) as resp:
+        for raw in resp:
+            line = raw.decode("utf-8", "replace").strip()
+            if not line.startswith("data:"):
+                continue
+            data = line[5:].strip()
+            if data == "[DONE]":
+                break
+            try:
+                chunk = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            for choice in chunk.get("choices", []):
+                piece = (choice.get("delta") or {}).get("content")
+                if piece:
+                    sys.stdout.write(piece)
+                    sys.stdout.flush()
+except Exception as exc:
+    print(f"\nerror: {exc}", file=sys.stderr)
+    sys.exit(1)
+print()
+PY
+}
+
 cmd_help() {
   cat <<EOF
 ai - run the local AI stack on this phone
@@ -363,6 +409,7 @@ ai - run the local AI stack on this phone
   ai stop     stop everything ai started
   ai status   what is running right now
   ai logs     tail a log:  ai logs server | ai logs bot | ai logs model
+  ai ask      ask the model, right here in the terminal
   ai build    build the engine natively on this phone
   ai model    download the model (ai model download)
   ai resume   finish whatever the phone lost (model, build) and start
@@ -397,6 +444,7 @@ case "${1:-help}" in
   stop|down|halt) shift; cmd_stop "$@" ;;
   status|st)     shift; cmd_status "$@" ;;
   logs|log)      shift; cmd_logs "$@" ;;
+  ask|chat)      shift; cmd_ask "$@" ;;
   build)         shift; cmd_build "$@" ;;
   resume)        shift; cmd_resume "$@" ;;
   model)         shift; cmd_model "$@" ;;
