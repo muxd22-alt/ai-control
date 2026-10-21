@@ -28,6 +28,9 @@ AI_API_KEY=
 # the 'ahwb' policy asks the vendor's gralloc for a buffer, and on a phone
 # that mapper aborts the process instead of returning an error.
 AI_SERVER_ARGS="--dense-weights anon --no-cache-pin"
+# Browser origins the engine answers to. The chat page on port 8766 is one of
+# them; without this the browser is told "cross-origin request refused".
+AI_ALLOW_ORIGIN="http://127.0.0.1:8766 http://localhost:8766"
 AI_START_TIMEOUT=600
 AI_REPO=unsloth/gemma-4-26B-A4B-it-GGUF
 AI_MODEL_NAME=gemma-4-26B-A4B-it-UD-Q4_K_M.gguf

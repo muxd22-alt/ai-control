@@ -44,6 +44,9 @@ AI_REPO="unsloth/gemma-4-26B-A4B-it-GGUF"
 AI_MODEL_NAME="gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"
 AI_MODEL="local"
 AI_WEB_PORT="8766"
+# Browser origins the engine answers to. The chat page on port 8766 is one of
+# them; without this the browser is told "cross-origin request refused".
+AI_ALLOW_ORIGIN="http://127.0.0.1:8766 http://localhost:8766"
 # The engine's own flags. `anon` keeps the dense weights in ordinary memory:
 # the `ahwb` policy asks the vendor's gralloc for a buffer, and on this phone
 # that mapper aborts the process instead of returning an error.
@@ -215,6 +218,11 @@ cmd_go() {
         *) args+=(--no-api-key) ;;
       esac
     fi
+    # Browsers are refused across origins unless the origin is allowed. The
+    # flag can be given more than once.
+    if [ -n "$AI_ALLOW_ORIGIN" ]; then
+      for o in $AI_ALLOW_ORIGIN; do args+=(--allow-origin "$o"); done
+    fi
     nohup "$AI_BMOE_SERVER" "${args[@]}" >>"$AI_LOG_DIR/bmoe-server.log" 2>&1 &
     echo $! > "$(pidfile bmoe-server)"
     disown 2>/dev/null || true
@@ -257,11 +265,18 @@ cmd_go() {
   if [ ! -f "$AI_BUILD_DIR/bin/ui/index.html" ] && ! is_running web; then
     cmd_web >/dev/null 2>&1 || true
   fi
+  # The chat page also goes beside the engine's own UI, so it can be opened
+  # from the same origin - no cross-origin question at all.
+  local page="$AI_ROOT/projects/ai-control/web/chat.html"
+  if [ -f "$page" ] && [ -d "$AI_BUILD_DIR/bin/ui" ]; then
+    cp -f "$page" "$AI_BUILD_DIR/bin/ui/chat.html" 2>/dev/null || true
+  fi
 
   echo
   if [ -f "$AI_BUILD_DIR/bin/ui/index.html" ]; then
     say "chat:      http://127.0.0.1:$AI_PORT/            (the app, in the phone browser)"
     say "           http://$(ip_addr):$AI_PORT/            (from another device on the wifi)"
+    say "chat page: http://127.0.0.1:$AI_PORT/chat.html   (the simple one)"
   else
     say "chat:      http://127.0.0.1:$AI_WEB_PORT/         (the chat page)"
     say "           http://$(ip_addr):$AI_WEB_PORT/         (from another device on the wifi)"
