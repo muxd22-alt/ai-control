@@ -194,6 +194,7 @@ cmd_go() {
   fi
 
   echo
+  if [ -f "$AI_BUILD_DIR/bin/ui/index.html" ]; then
     say "chat:      http://127.0.0.1:$AI_PORT/            (the app, in the phone browser)"
     say "           http://$(ip_addr):$AI_PORT/            (from another device on the wifi)"
   else
