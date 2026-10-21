@@ -44,7 +44,22 @@ for p in ai-control bmoe-termux telegram-agent; do
     ( cd "$d" && git pull --ff-only ) || say "$p: pull failed, leaving as is"
   else
     say "$p: cloning"
-    git clone --depth 1 "https://github.com/$GITHUB_USER/$p.git" "$d" || say "$p: clone failed"
+    tmp="$d.tmp"
+    rm -rf "$tmp"
+    if git clone --depth 1 "https://github.com/$GITHUB_USER/$p.git" "$tmp"; then
+      if [ -d "$d" ]; then
+        # The folder is not empty (an upstream clone lives there): keep what is
+        # already there and add the project files on top of it.
+        cp -a "$tmp/.git" "$d/.git"
+        ( cd "$tmp" && git archive HEAD ) | tar -x -C "$d"
+        rm -rf "$tmp"
+      else
+        mv "$tmp" "$d"
+      fi
+    else
+      say "$p: clone failed"
+      rm -rf "$tmp"
+    fi
   fi
 done
 
@@ -56,8 +71,11 @@ say "ai -> $AI_PROJECTS/ai-control/ai"
 
 echo "==> python packages for the telegram bridge"
 if command -v pip >/dev/null 2>&1; then
-  pip install --quiet --upgrade python-telegram-bot openai >/dev/null 2>&1 \
-    && say "python-telegram-bot, openai installed" \
+  # python-telegram-bot only: the openai package needs a Rust toolchain to
+  # build on Termux, and the bridge talks to the local server with the
+  # standard library instead.
+  pip install --quiet --upgrade python-telegram-bot >/dev/null 2>&1 \
+    && say "python-telegram-bot installed" \
     || say "pip install failed - the telegram bridge will not start until it is fixed"
 else
   say "pip not found - install python with: pkg install python"
