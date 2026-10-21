@@ -41,6 +41,7 @@ for p in ai-control bmoe-termux telegram-agent; do
   d="$AI_PROJECTS/$p"
   if [ -d "$d/.git" ]; then
     say "$p: present, updating"
+    git -C "$d" config core.fileMode false
     ( cd "$d" && git pull --ff-only ) || say "$p: pull failed, leaving as is"
   else
     say "$p: cloning"
@@ -56,6 +57,7 @@ for p in ai-control bmoe-termux telegram-agent; do
       else
         mv "$tmp" "$d"
       fi
+      git -C "$d" config core.fileMode false
     else
       say "$p: clone failed"
       rm -rf "$tmp"
@@ -74,9 +76,13 @@ if command -v pip >/dev/null 2>&1; then
   # python-telegram-bot only: the openai package needs a Rust toolchain to
   # build on Termux, and the bridge talks to the local server with the
   # standard library instead.
-  pip install --quiet --upgrade python-telegram-bot >/dev/null 2>&1 \
-    && say "python-telegram-bot installed" \
-    || say "pip install failed - the telegram bridge will not start until it is fixed"
+  if python -c 'import telegram' >/dev/null 2>&1; then
+    say "python-telegram-bot present"
+  elif pip install --quiet python-telegram-bot >/dev/null 2>&1; then
+    say "python-telegram-bot installed"
+  else
+    say "pip install failed - the telegram bridge will not start until it is fixed"
+  fi
 else
   say "pip not found - install python with: pkg install python"
 fi
