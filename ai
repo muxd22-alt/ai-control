@@ -276,15 +276,13 @@ cmd_build() {
 # never "start over".
 cmd_resume() {
   ensure_dirs
-  local part="$AI_MODEL_FILE.part"
-  if [ ! -f "$AI_MODEL_FILE" ]; then
-    if [ -f "$part" ]; then
-      info "model is half-downloaded ($(human_size "$(stat -c%s "$part")")) - resuming"
+  local part="$AI_MODEL_FILE.part"  if [ ! -f "$AI_MODEL_FILE" ]; then
+    if [ -f "$AI_MODEL_FILE.part" ]; then
+      info "model is half-downloaded ($(human_size "$(stat -c%s "$AI_MODEL_FILE.part")")) - resuming"
     else
       info "model missing - downloading"
     fi
-    bash "$AI_ROOT/projects/ai-control/model-download.sh" || die "model download failed"
-    ok "model ready"
+    cmd_model download
   else
     ok "model already complete"
   fi
@@ -302,7 +300,21 @@ cmd_model() {
   local sub="${1:-download}"
   case "$sub" in
     download|fetch)
-      bash "$AI_ROOT/projects/ai-control/model-download.sh"
+      if [ -f "$AI_MODEL_FILE" ]; then
+        ok "model already there: $AI_MODEL_FILE ($(human_size "$(stat -c%s "$AI_MODEL_FILE")"))"
+        return 0
+      fi
+      if is_running model-download; then
+        ok "the download is already running (pid $(pid_of model-download))"
+      else
+        info "starting the download (it survives a killed Termux and resumes where it stopped)"
+        nohup bash "$AI_ROOT/projects/ai-control/keepalive-download.sh" \
+          >>"$AI_LOG_DIR/model-download.log" 2>&1 &
+        echo $! > "$(pidfile model-download)"
+        disown 2>/dev/null || true
+        sleep 2
+        ok "downloading to $AI_MODEL_FILE - watch it with: ai logs model"
+      fi
       ;;
     path)
       echo "$AI_MODEL_FILE"

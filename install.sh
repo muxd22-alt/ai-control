@@ -65,23 +65,14 @@ for p in ai-control bmoe-termux telegram-agent; do
   fi
 done
 
-echo "==> download service"
-svc="$PREFIX/var/service/ai-download"
-if [ -d "$AI_PROJECTS/ai-control/service/ai-download" ]; then
-  mkdir -p "$svc/log"
-  cp -a "$AI_PROJECTS/ai-control/service/ai-download/run" "$svc/run"
-  cp -a "$AI_PROJECTS/ai-control/service/ai-download/log/run" "$svc/log/run"
-  chmod 755 "$svc/run" "$svc/log/run" 2>/dev/null || true
-  say "ai-download installed: runit keeps the model download alive"
-fi
-
 echo "==> link"
 ln -sf "$AI_PROJECTS/ai-control/ai" "$AI_ROOT/bin/ai"
 ln -sf "$AI_PROJECTS/ai-control/ai" "$HOME/bin/ai"
 # $PREFIX/bin is on every PATH Termux builds, so the command works in any
 # shell, however that shell was started.
 ln -sf "$AI_PROJECTS/ai-control/ai" "$PREFIX/bin/ai"
-chmod 755 "$AI_PROJECTS/ai-control/ai" "$AI_PROJECTS/ai-control/model-download.sh" 2>/dev/null || true
+chmod 755 "$AI_PROJECTS/ai-control/ai" "$AI_PROJECTS/ai-control/model-download.sh" \
+         "$AI_PROJECTS/ai-control/keepalive-download.sh" 2>/dev/null || true
 say "ai -> $AI_PROJECTS/ai-control/ai"
 # and $HOME/bin for shells that only know about that one
 if ! grep -q 'HOME/bin' "$HOME/.bashrc" 2>/dev/null; then

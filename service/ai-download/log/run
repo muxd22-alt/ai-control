@@ -1,3 +1,0 @@
-#!/data/data/com.termux/files/usr/bin/sh
-mkdir -p "$HOME/ai/logs"
-exec svlogd -tt "$HOME/ai/logs/download-sv"
