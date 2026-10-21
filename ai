@@ -1,0 +1,349 @@
+#!/usr/bin/env bash
+# ai - one word to run the whole local AI stack on this phone.
+#
+#   ai go      start everything (engine server + telegram bridge)
+#   ai stop    stop everything this tool started
+#   ai status  what is running, what is loaded
+#   ai logs    tail a log (server | bot | model)
+#   ai build   native Termux build of the engine
+#   ai model   download / verify the model
+#   ai update  git pull every project, rebuild if the engine changed
+#   ai doctor  diagnose the stack
+#
+# Everything lives under one root (default ~/ai):
+#   bin/      this command (symlinked to ~/bin/ai)
+#   etc/      ai.env - the configuration
+#   models/   the .gguf model files
+#   build/    the native build tree (bmoe-server, bmoe-cli)
+#   logs/     one log per service
+#   run/      pid files
+#   projects/ one folder per project, each its own git repo
+set -uo pipefail
+
+AI_ROOT="${AI_ROOT:-$HOME/ai}"
+AI_ETC="$AI_ROOT/etc/ai.env"
+AI_LOG_DIR="$AI_ROOT/logs"
+AI_RUN_DIR="$AI_ROOT/run"
+AI_MODEL_DIR="$AI_ROOT/models"
+AI_BUILD_DIR="$AI_ROOT/build"
+AI_PROJECTS="$AI_ROOT/projects"
+
+# --- configuration ------------------------------------------------------------
+# Defaults live here; ai.env overrides them. ai.env is plain KEY=VALUE and is
+# sourced, so it can also export things.
+AI_MODEL_FILE=""
+AI_HOST="0.0.0.0"
+AI_PORT="8765"
+AI_API_KEY="local"
+AI_BMOE_SERVER="$AI_BUILD_DIR/bin/bmoe-server"
+AI_BMOE_CLI="$AI_BUILD_DIR/bin/bmoe-cli"
+AI_TELEGRAM_TOKEN=""
+AI_TELEGRAM_USER_ID=""
+AI_REPO="unsloth/gemma-4-26B-A4B-it-GGUF"
+AI_MODEL_NAME="gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"
+AI_SERVER_ARGS="--auto"
+AI_START_TIMEOUT="180"
+
+if [ -f "$AI_ETC" ]; then
+  # shellcheck disable=SC1090
+  . "$AI_ETC"
+fi
+
+# --- helpers -----------------------------------------------------------------
+c_ok=""; c_bad=""; c_dim=""; c_off=""
+if [ -t 1 ]; then c_ok=$'\033[32m'; c_bad=$'\033[31m'; c_dim=$'\033[2m'; c_off=$'\033[0m'; fi
+
+say()  { printf '%s\n' "$*"; }
+info() { printf '%s==>%s %s\n' "$c_dim" "$c_off" "$*"; }
+ok()   { printf '%s  ok%s %s\n' "$c_ok" "$c_off" "$*"; }
+bad()  { printf '%sfail%s %s\n' "$c_bad" "$c_off" "$*"; }
+warn() { printf '%swarn%s %s\n' "$c_dim" "$c_off" "$*"; }
+
+die() { bad "$*"; exit 1; }
+
+ensure_dirs() {
+  mkdir -p "$AI_LOG_DIR" "$AI_RUN_DIR" "$AI_MODEL_DIR" "$AI_BUILD_DIR" "$AI_PROJECTS" "$AI_ROOT/etc"
+}
+
+pidfile() { echo "$AI_RUN_DIR/$1.pid"; }
+
+is_running() {
+  local f; f="$(pidfile "$1")"
+  [ -f "$f" ] || return 1
+  local pid; pid="$(cat "$f" 2>/dev/null)"
+  [ -n "$pid" ] || return 1
+  kill -0 "$pid" 2>/dev/null
+}
+
+pid_of() {
+  local f; f="$(pidfile "$1")"
+  [ -f "$f" ] && cat "$f" 2>/dev/null
+}
+
+# Stop a service: SIGTERM the pid, wait, then SIGKILL. The pid file is removed
+# only when the process is really gone, so a half-dead process is never
+# reported as stopped.
+stop_service() {
+  local name="$1" f pid
+  f="$(pidfile "$name")"
+  if [ ! -f "$f" ]; then
+    info "$name: not running (no pid file)"
+    return 0
+  fi
+  pid="$(cat "$f" 2>/dev/null)"
+  if [ -z "$pid" ] || ! kill -0 "$pid" 2>/dev/null; then
+    rm -f "$f"
+    info "$name: not running (stale pid file removed)"
+    return 0
+  fi
+  kill -TERM "$pid" 2>/dev/null
+  local i=0
+  while [ $i -lt 30 ]; do
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 1
+    i=$((i + 1))
+  done
+  if kill -0 "$pid" 2>/dev/null; then
+    warn "$name: still alive after SIGTERM, sending SIGKILL"
+    kill -KILL "$pid" 2>/dev/null
+    sleep 1
+  fi
+  rm -f "$f"
+  ok "$name: stopped (pid $pid)"
+}
+
+# Wait until the server answers on its port. Returns 0 on success.
+wait_for_server() {
+  local port="$1" timeout="$2" i=0 code
+  while [ $i -lt "$timeout" ]; do
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$port/v1/models" 2>/dev/null)"
+    if [ "$code" = "200" ]; then return 0; fi
+    if ! is_running bmoe-server; then return 1; fi
+    sleep 2
+    i=$((i + 2))
+  done
+  return 1
+}
+
+# --- commands ----------------------------------------------------------------
+cmd_go() {
+  ensure_dirs
+  [ -x "$AI_BMOE_SERVER" ] || die "engine not built: $AI_BMOE_SERVER  -> run: ai build"
+  [ -f "$AI_MODEL_FILE" ] || die "model missing: $AI_MODEL_FILE  -> run: ai model"
+
+  # Keep the phone awake and out of the battery saver while the engine runs.
+  command -v termux-wake-lock >/dev/null 2>&1 && termux-wake-lock >/dev/null 2>&1
+
+  if is_running bmoe-server; then
+    ok "engine already running (pid $(pid_of bmoe-server))"
+  else
+    info "starting engine: bmoe-server -m $(basename "$AI_MODEL_FILE") $AI_SERVER_ARGS --host $AI_HOST --port $AI_PORT"
+    nohup "$AI_BMOE_SERVER" \
+      -m "$AI_MODEL_FILE" \
+      $AI_SERVER_ARGS \
+      --host "$AI_HOST" \
+      --port "$AI_PORT" \
+      ${AI_API_KEY:+--api-key "$AI_API_KEY"} \
+      >>"$AI_LOG_DIR/bmoe-server.log" 2>&1 &
+    echo $! > "$(pidfile bmoe-server)"
+    disown 2>/dev/null || true
+    info "waiting for the engine to answer on port $AI_PORT ..."
+    if wait_for_server "$AI_PORT" "$AI_START_TIMEOUT"; then
+      ok "engine up (pid $(pid_of bmoe-server))"
+    else
+      bad "engine did not answer within ${AI_START_TIMEOUT}s - see: ai logs server"
+      tail -n 20 "$AI_LOG_DIR/bmoe-server.log" 2>/dev/null
+      return 1
+    fi
+  fi
+
+  if [ -n "$AI_TELEGRAM_TOKEN" ]; then
+    if is_running telegram-agent; then
+      ok "telegram bridge already running (pid $(pid_of telegram-agent))"
+    else
+      if command -v python >/dev/null 2>&1 && python -c 'import telegram, openai' 2>/dev/null; then
+        info "starting telegram bridge"
+        nohup python "$AI_PROJECTS/telegram-agent/bot.py" \
+          >>"$AI_LOG_DIR/telegram-agent.log" 2>&1 &
+        echo $! > "$(pidfile telegram-agent)"
+        disown 2>/dev/null || true
+        sleep 2
+        if is_running telegram-agent; then
+          ok "telegram bridge up (pid $(pid_of telegram-agent))"
+        else
+          bad "telegram bridge failed to start - see: ai logs bot"
+        fi
+      else
+        warn "telegram bridge not installed (pip install python-telegram-bot openai)"
+      fi
+    fi
+  fi
+
+  echo
+  say "chat:      http://127.0.0.1:$AI_PORT/            (from the phone browser)"
+  say "           http://$(ip_addr):$AI_PORT/            (from another device on the wifi)"
+  say "api:       http://127.0.0.1:$AI_PORT/v1"
+  say "model:     $(basename "$AI_MODEL_FILE")"
+  say "logs:      ai logs server | ai logs bot | ai logs model"
+  say "stop:      ai stop"
+}
+
+cmd_stop() {
+  stop_service telegram-agent
+  stop_service bmoe-server
+  # Anything left over from an earlier run of the same binary.
+  if pgrep -f "$AI_BMOE_SERVER" >/dev/null 2>&1; then
+    warn "leftover engine process(es) - terminating"
+    pkill -f "$AI_BMOE_SERVER" 2>/dev/null
+    sleep 1
+  fi
+  ok "stack stopped"
+}
+
+cmd_status() {
+  ensure_dirs
+  echo "root:   $AI_ROOT"
+  echo
+  if is_running bmoe-server; then
+    local pid; pid="$(pid_of bmoe-server)"
+    ok "engine      running (pid $pid, up $(proc_uptime "$pid"))"
+    local code
+    code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$AI_PORT/v1/models" 2>/dev/null)"
+    [ "$code" = "200" ] && ok "http        answering on port $AI_PORT" \
+                         || warn "http        not answering yet (last code ${code:-none})"
+  else
+    bad "engine      stopped"
+  fi
+  if is_running telegram-agent; then
+    ok "telegram    running (pid $(pid_of telegram-agent))"
+  else
+    info "telegram    stopped"
+  fi
+  echo
+  if [ -f "$AI_MODEL_FILE" ]; then
+    ok "model       $(basename "$AI_MODEL_FILE") ($(human_size "$(stat -c%s "$AI_MODEL_FILE")"))"
+  else
+    bad "model       missing: $AI_MODEL_FILE"
+  fi
+  [ -x "$AI_BMOE_SERVER" ] && ok "binary      $AI_BMOE_SERVER" \
+                           || bad "binary      missing: $AI_BMOE_SERVER (run: ai build)"
+  echo
+  say "memory:     $(free -h 2>/dev/null | awk '/^Mem:/{print $3" used / "$7" available"}')"
+  say "disk:       $(df -h "$AI_MODEL_DIR" 2>/dev/null | awk 'NR==2{print $4" free of "$2}')"
+  say "logs:       $AI_LOG_DIR"
+}
+
+cmd_logs() {
+  ensure_dirs
+  local what="${1:-server}"
+  case "$what" in
+    server|engine) touch "$AI_LOG_DIR/bmoe-server.log"; tail -n 60 -f "$AI_LOG_DIR/bmoe-server.log" ;;
+    bot|telegram)  touch "$AI_LOG_DIR/telegram-agent.log"; tail -n 60 -f "$AI_LOG_DIR/telegram-agent.log" ;;
+    model|download) touch "$AI_LOG_DIR/model-download.log"; tail -n 60 -f "$AI_LOG_DIR/model-download.log" ;;
+    *) say "usage: ai logs [server|bot|model]"; return 1 ;;
+  esac
+}
+
+cmd_build() {
+  ensure_dirs
+  local dir="$AI_PROJECTS/bmoe-termux"
+  [ -d "$dir" ] || die "project not found: $dir (clone muxd22-alt/bmoe-termux)"
+  info "building the engine natively on this phone (this takes a while)"
+  bash "$dir/build.sh"
+  [ -x "$AI_BMOE_SERVER" ] && ok "engine built: $AI_BMOE_SERVER" || die "build failed - see $AI_LOG_DIR/build.log"
+}
+
+cmd_model() {
+  ensure_dirs
+  local sub="${1:-download}"
+  case "$sub" in
+    download|fetch)
+      bash "$AI_ROOT/projects/ai-control/model-download.sh"
+      ;;
+    path)
+      echo "$AI_MODEL_FILE"
+      ;;
+    *)
+      say "usage: ai model [download|path]"
+      return 1
+      ;;
+  esac
+}
+
+cmd_update() {
+  local dir changed=0
+  for dir in "$AI_PROJECTS"/*/; do
+    [ -d "$dir/.git" ] || continue
+    local name; name="$(basename "$dir")"
+    info "updating $name"
+    ( cd "$dir" && git pull --ff-only ) || warn "$name: pull failed"
+  done
+  if [ -x "$AI_BMOE_SERVER" ]; then
+    info "engine binary present - rebuild only if the source changed"
+  fi
+  ok "update done"
+}
+
+cmd_doctor() {
+  ensure_dirs
+  local fail=0
+  for t in curl git python tar; do
+    if command -v "$t" >/dev/null 2>&1; then ok "$t: $(command -v "$t")"; else bad "$t: missing"; fail=1; fi
+  done
+  if [ -x "$AI_BMOE_SERVER" ]; then ok "engine binary: $AI_BMOE_SERVER"; else bad "engine binary missing (run: ai build)"; fail=1; fi
+  if [ -f "$AI_MODEL_FILE" ]; then ok "model: $AI_MODEL_FILE ($(human_size "$(stat -c%s "$AI_MODEL_FILE")"))"; else bad "model missing (run: ai model)"; fail=1; fi
+  if is_running bmoe-server; then ok "engine process: pid $(pid_of bmoe-server)"; else warn "engine process: stopped"; fi
+  code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$AI_PORT/v1/models" 2>/dev/null)"
+  if [ "$code" = "200" ]; then ok "api: answering on $AI_PORT"; else warn "api: not answering on $AI_PORT"; fi
+  say "free space: $(df -h "$AI_MODEL_DIR" 2>/dev/null | awk 'NR==2{print $4}')  ram: $(free -h 2>/dev/null | awk '/^Mem:/{print $7" available"}')"
+  return $fail
+}
+
+cmd_help() {
+  cat <<EOF
+ai - run the local AI stack on this phone
+
+  ai go       start the engine (and the telegram bridge when it is configured)
+  ai stop     stop everything ai started
+  ai status   what is running right now
+  ai logs     tail a log:  ai logs server | ai logs bot | ai logs model
+  ai build    build the engine natively on this phone
+  ai model    download the model (ai model download)
+  ai update   git pull every project
+  ai doctor   check the stack
+EOF
+}
+
+# --- small utilities ---------------------------------------------------------
+ip_addr() {
+  ip -4 addr show 2>/dev/null | awk '/wlan0|eth0/{f=1} f && $1=="inet"{print $2}' | cut -d/ -f1 | head -1
+}
+
+human_size() {
+  awk -v b="${1:-0}" 'BEGIN{
+    if (b>1099511627776) printf "%.2f TB", b/1099511627776;
+    else if (b>1073741824) printf "%.2f GB", b/1073741824;
+    else if (b>1048576) printf "%.1f MB", b/1048576;
+    else printf "%d B", b;
+  }'
+}
+
+proc_uptime() {
+  local pid="$1" up
+  up="$(ps -o etime= -p "$pid" 2>/dev/null | tr -d ' ')"
+  echo "${up:-?}"
+}
+
+# --- dispatch ----------------------------------------------------------------
+case "${1:-help}" in
+  go|start|up)   shift; cmd_go "$@" ;;
+  stop|down|halt) shift; cmd_stop "$@" ;;
+  status|st)     shift; cmd_status "$@" ;;
+  logs|log)      shift; cmd_logs "$@" ;;
+  build)         shift; cmd_build "$@" ;;
+  model)         shift; cmd_model "$@" ;;
+  update|pull)   shift; cmd_update "$@" ;;
+  doctor|check)  shift; cmd_doctor "$@" ;;
+  help|-h|--help) shift; cmd_help "$@" ;;
+  *) cmd_help; exit 1 ;;
+esac
