@@ -19,12 +19,16 @@ echo "==> config"
 if [ ! -f "$AI_ROOT/etc/ai.env" ]; then
   cat > "$AI_ROOT/etc/ai.env" <<EOF
 # ai stack configuration - one KEY=VALUE per line, sourced by the ai command.
+# Values with spaces are quoted: this file is sourced by bash.
 AI_MODEL_FILE=$AI_ROOT/models/gemma-4-26B-A4B-it-UD-Q4_K_M.gguf
 AI_HOST=0.0.0.0
 AI_PORT=8765
-AI_API_KEY=local
-AI_SERVER_ARGS=--auto
-AI_START_TIMEOUT=180
+AI_API_KEY=
+# The engine's own flags. 'anon' keeps the dense weights in ordinary memory:
+# the 'ahwb' policy asks the vendor's gralloc for a buffer, and on a phone
+# that mapper aborts the process instead of returning an error.
+AI_SERVER_ARGS="--dense-weights anon --no-cache-pin"
+AI_START_TIMEOUT=600
 AI_REPO=unsloth/gemma-4-26B-A4B-it-GGUF
 AI_MODEL_NAME=gemma-4-26B-A4B-it-UD-Q4_K_M.gguf
 # The telegram bridge starts only when a token is set here.
