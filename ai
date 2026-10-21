@@ -154,14 +154,16 @@ open_session() {
     ok "the model is loaded and ready"
     return 0
   fi
-  info "opening the chat session with $(basename "$AI_MODEL_FILE")"
-  code="$(curl -s -o "$AI_RUN_DIR/session-load.json" -w '%{http_code}' -X POST \
-    "http://127.0.0.1:$AI_PORT/api/session/load" \
-    -H 'Content-Type: application/json' \
-    -d "{\"model\":\"$AI_MODEL_FILE\"}" --max-time 30 2>/dev/null)"
-  if [ "$code" != "202" ]; then
-    bad "the server refused the load (http $code): $(head -c 200 "$AI_RUN_DIR/session-load.json" 2>/dev/null)"
-    return 1
+  if [ "$st" = "empty" ]; then
+    info "opening the chat session with $(basename "$AI_MODEL_FILE")"
+    # The server holds the request while it measures the phone and loads the
+    # model, so this call can take minutes - it runs in the background.
+    nohup curl -s -o "$AI_RUN_DIR/session-load.json" -X POST \
+      "http://127.0.0.1:$AI_PORT/api/session/load" \
+      -H 'Content-Type: application/json' \
+      -d "{\"model\":\"$AI_MODEL_FILE\"}" --max-time 3600 \
+      >>"$AI_LOG_DIR/session-load.log" 2>&1 &
+    disown 2>/dev/null || true
   fi
   info "the phone is measuring itself and loading the model - this takes a while"
   i=0
