@@ -44,8 +44,11 @@ AI_REPO="unsloth/gemma-4-26B-A4B-it-GGUF"
 AI_MODEL_NAME="gemma-4-26B-A4B-it-UD-Q4_K_M.gguf"
 AI_MODEL="local"
 AI_WEB_PORT="8766"
-AI_SERVER_ARGS="--auto"
-AI_START_TIMEOUT="180"
+# The engine's own flags. `anon` keeps the dense weights in ordinary memory:
+# the `ahwb` policy asks the vendor's gralloc for a buffer, and on this phone
+# that mapper aborts the process instead of returning an error.
+AI_SERVER_ARGS="--dense-weights anon --no-cache-pin"
+AI_START_TIMEOUT="600"
 
 if [ -f "$AI_ETC" ]; then
   # shellcheck disable=SC1090
@@ -128,6 +131,59 @@ wait_for_server() {
   return 1
 }
 
+# The server's own state: empty | planning | loading | ready | error
+api_info() {
+  curl -s --max-time 5 "http://127.0.0.1:$AI_PORT/api/info" 2>/dev/null
+}
+
+api_state() {
+  api_info | sed -n 's/.*"state"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+api_error() {
+  api_info | sed -n 's/.*"error"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p'
+}
+
+# Open the chat session with the model and wait until it is ready. The server
+# measures the phone first, then reads the model: on this phone that is about
+# a minute and a half.
+open_session() {
+  local st code i
+  st="$(api_state)"
+  if [ "$st" = "ready" ]; then
+    ok "the model is loaded and ready"
+    return 0
+  fi
+  info "opening the chat session with $(basename "$AI_MODEL_FILE")"
+  code="$(curl -s -o "$AI_RUN_DIR/session-load.json" -w '%{http_code}' -X POST \
+    "http://127.0.0.1:$AI_PORT/api/session/load" \
+    -H 'Content-Type: application/json' \
+    -d "{\"model\":\"$AI_MODEL_FILE\"}" --max-time 30 2>/dev/null)"
+  if [ "$code" != "202" ]; then
+    bad "the server refused the load (http $code): $(head -c 200 "$AI_RUN_DIR/session-load.json" 2>/dev/null)"
+    return 1
+  fi
+  info "the phone is measuring itself and loading the model - this takes a while"
+  i=0
+  while [ $i -lt "$AI_START_TIMEOUT" ]; do
+    st="$(api_state)"
+    case "$st" in
+      ready)
+        ok "the model is loaded and ready"
+        return 0
+        ;;
+      error)
+        bad "the load failed: $(api_error)"
+        return 1
+        ;;
+    esac
+    sleep 5
+    i=$((i + 5))
+  done
+  bad "the model was still not ready after ${AI_START_TIMEOUT}s"
+  return 1
+}
+
 # --- commands ----------------------------------------------------------------
 cmd_go() {
   ensure_dirs
@@ -145,31 +201,38 @@ cmd_go() {
   if is_running bmoe-server; then
     ok "engine already running (pid $(pid_of bmoe-server))"
   else
-    info "starting engine: bmoe-server -m $(basename "$AI_MODEL_FILE") $AI_SERVER_ARGS --host $AI_HOST --port $AI_PORT"
-    nohup "$AI_BMOE_SERVER" \
-      -m "$AI_MODEL_FILE" \
-      $AI_SERVER_ARGS \
-      --host "$AI_HOST" \
-      --port "$AI_PORT" \
-      ${AI_API_KEY:+--api-key "$AI_API_KEY"} \
-      >>"$AI_LOG_DIR/bmoe-server.log" 2>&1 &
+    info "starting the engine on port $AI_PORT"
+    local args=(-m "$AI_MODEL_FILE" --host "$AI_HOST" --port "$AI_PORT")
+    # the engine's own flags from the config
+    for a in $AI_SERVER_ARGS; do args+=("$a"); done
+    if [ -n "$AI_API_KEY" ]; then
+      args+=(--api-key "$AI_API_KEY")
+    else
+      case "$AI_HOST" in
+        127.0.0.1|localhost|::1) ;;
+        *) args+=(--no-api-key) ;;
+      esac
+    fi
+    nohup "$AI_BMOE_SERVER" "${args[@]}" >>"$AI_LOG_DIR/bmoe-server.log" 2>&1 &
     echo $! > "$(pidfile bmoe-server)"
     disown 2>/dev/null || true
     info "waiting for the engine to answer on port $AI_PORT ..."
-    if wait_for_server "$AI_PORT" "$AI_START_TIMEOUT"; then
+    if wait_for_server "$AI_PORT" 120; then
       ok "engine up (pid $(pid_of bmoe-server))"
     else
-      bad "engine did not answer within ${AI_START_TIMEOUT}s - see: ai logs server"
+      bad "engine did not answer within 120s - see: ai logs server"
       tail -n 20 "$AI_LOG_DIR/bmoe-server.log" 2>/dev/null
       return 1
     fi
   fi
 
+  open_session || return 1
+
   if [ -n "$AI_TELEGRAM_TOKEN" ]; then
     if is_running telegram-agent; then
       ok "telegram bridge already running (pid $(pid_of telegram-agent))"
     else
-      if command -v python >/dev/null 2>&1 && python -c 'import telegram, openai' 2>/dev/null; then
+      if command -v python >/dev/null 2>&1 && python -c 'import telegram' 2>/dev/null; then
         info "starting telegram bridge"
         nohup python "$AI_PROJECTS/telegram-agent/bot.py" \
           >>"$AI_LOG_DIR/telegram-agent.log" 2>&1 &
@@ -227,10 +290,17 @@ cmd_status() {
   if is_running bmoe-server; then
     local pid; pid="$(pid_of bmoe-server)"
     ok "engine      running (pid $pid, up $(proc_uptime "$pid"))"
-    local code
+    local code st
     code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 3 "http://127.0.0.1:$AI_PORT/v1/models" 2>/dev/null)"
     [ "$code" = "200" ] && ok "http        answering on port $AI_PORT" \
                          || warn "http        not answering yet (last code ${code:-none})"
+    st="$(api_state)"
+    case "$st" in
+      ready)     ok "model       loaded and ready" ;;
+      loading|planning) info "model       $st" ;;
+      error)     bad "model       load failed: $(api_error)" ;;
+      *)         info "model       no session open (run: ai go)" ;;
+    esac
   else
     bad "engine      stopped"
   fi
